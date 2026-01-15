@@ -14,7 +14,7 @@
 
 > [!IMPORTANT]
 >
-> 本项目扩展的具体数学逻辑见[PROJECT_SUMMARY](PROJECT_SUMMARY.md)
+> 本项目扩展的具体数学逻辑见[PROJECT_SUMMARY](docs/PROJECT_SUMMARY.md)
 
 ## 🎯 概述
 
