@@ -1,0 +1,63 @@
+\begin{thebibliography}{6}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Dao et~al.(2022)Dao, Fu, Ermon, Rudra, and
+  Ré]{dao2022flashattentionfastmemoryefficientexact}
+Tri Dao, Daniel~Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré.
+\newblock Flashattention: Fast and memory-efficient exact attention with
+  io-awareness, 2022.
+\newblock URL \url{https://arxiv.org/abs/2205.14135}.
+
+\bibitem[Ho et~al.(2019)Ho, Kalchbrenner, Weissenborn, and
+  Salimans]{ho2019axialattentionmultidimensionaltransformers}
+Jonathan Ho, Nal Kalchbrenner, Dirk Weissenborn, and Tim Salimans.
+\newblock Axial attention in multidimensional transformers, 2019.
+\newblock URL \url{https://arxiv.org/abs/1912.12180}.
+
+\bibitem[Jumper et~al.(2021)Jumper, Evans, Pritzel, Green, Figurnov,
+  Ronneberger, Tunyasuvunakool, Bates, Žídek, Potapenko, Bridgland, Meyer,
+  Kohl, Ballard, Cowie, Romera-Paredes, Nikolov, Jain, Adler, Back, Petersen,
+  Reiman, Clancy, Zielinski, Steinegger, Pacholska, Berghammer, Bodenstein,
+  Silver, Vinyals, Senior, Kavukcuoglu, Kohli, and Hassabis]{Jumper_2021}
+John Jumper, Richard Evans, Alexander Pritzel, Tim Green, Michael Figurnov,
+  Olaf Ronneberger, Kathryn Tunyasuvunakool, Russ Bates, Augustin Žídek, Anna
+  Potapenko, Alex Bridgland, Clemens Meyer, Simon A.~A. Kohl, Andrew~J.
+  Ballard, Andrew Cowie, Bernardino Romera-Paredes, Stanislav Nikolov, Rishub
+  Jain, Jonas Adler, Trevor Back, Stig Petersen, David Reiman, Ellen Clancy,
+  Michal Zielinski, Martin Steinegger, Michalina Pacholska, Tamas Berghammer,
+  Sebastian Bodenstein, David Silver, Oriol Vinyals, Andrew~W. Senior, Koray
+  Kavukcuoglu, Pushmeet Kohli, and Demis Hassabis.
+\newblock Highly accurate protein structure prediction with alphafold.
+\newblock \emph{Nature}, 596\penalty0 (7873):\penalty0 583–589, July 2021.
+\newblock ISSN 1476-4687.
+\newblock \doi{10.1038/s41586-021-03819-2}.
+\newblock URL \url{http://dx.doi.org/10.1038/s41586-021-03819-2}.
+
+\bibitem[Lin and AlQuraishi(2023)]{lin2023generatingnoveldesignablediverse}
+Yeqing Lin and Mohammed AlQuraishi.
+\newblock Generating novel, designable, and diverse protein structures by
+  equivariantly diffusing oriented residue clouds, 2023.
+\newblock URL \url{https://arxiv.org/abs/2301.12485}.
+
+\bibitem[Liu et~al.(2025)Liu, Elaldi, Franklin, Russell, Atwal, Ban, and
+  Viessmann]{liu2025flashinvariantpointattention}
+Andrew Liu, Axel Elaldi, Nicholas~T Franklin, Nathan Russell, Gurinder~S Atwal,
+  Yih-En~A Ban, and Olivia Viessmann.
+\newblock Flash invariant point attention, 2025.
+\newblock URL \url{https://arxiv.org/abs/2505.11580}.
+
+\bibitem[Xie et~al.(2026)Xie, Wei, Cao, Zhao, Deng, Li, Dai, Gao, Chang, Yu,
+  Zhao, Zhou, Xu, Zhang, Zeng, Hu, Wang, Yuan, Wang, and
+  Liang]{xie2026mhcmanifoldconstrainedhyperconnections}
+Zhenda Xie, Yixuan Wei, Huanqi Cao, Chenggang Zhao, Chengqi Deng, Jiashi Li,
+  Damai Dai, Huazuo Gao, Jiang Chang, Kuai Yu, Liang Zhao, Shangyan Zhou, Zhean
+  Xu, Zhengyan Zhang, Wangding Zeng, Shengding Hu, Yuqing Wang, Jingyang Yuan,
+  Lean Wang, and Wenfeng Liang.
+\newblock mhc: Manifold-constrained hyper-connections, 2026.
+\newblock URL \url{https://arxiv.org/abs/2512.24880}.
+
+\end{thebibliography}

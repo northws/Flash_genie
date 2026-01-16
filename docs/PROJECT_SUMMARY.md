@@ -896,78 +896,457 @@ class GradientAccumulator:
 **分布式训练**:
 - 多GPU DDP
 - Gradient Accumulation: 大批量训练
+## Stage 6 更新
+
+### 1. mHC Loss
+
+ `mhc_loss.py`模块实现了一套受 mHC（Matrix Hyper-Column）启发的正则化损失函数，旨在稳定深度残差网络中的梯度流，特别是针对长序列蛋白质结构的生成。
+
+以下是各个核心损失函数的数学逻辑。
+
+### 符号定义
+
+- $\mathbf{x}_{in}, \mathbf{x}_{out} \in \mathbb{R}^{B \times L \times C}$: 层的输入与输出张量。
+    
+- $\mathbf{F}(\mathbf{x}) \in \mathbb{R}^{B \times L \times C}$: 残差分支的输出 (即 $\mathbf{x}_{out} = \mathbf{x}_{in} + \mathbf{F}(\mathbf{x}_{in})$)。
+    
+- $\epsilon_{pred}, \epsilon_{target} \in \mathbb{R}^{B \times L \times 3}$: 扩散模型中的预测噪声和目标噪声。
+    
+- $M \in \{0, 1\}^{B \times L}$: 序列掩码。
+    
+- $\|\cdot\|_2$: Frobenius 范数或 L2 范数（在 masked 区域上计算）。
+    
 
 ---
 
-## 📦 文件清单
+#### 1. 核心 mHC 正则化损失 (Core mHC Regularization)
 
+这些损失函数旨在模拟 mHC 架构中双随机矩阵（Doubly Stochastic Matrix）带来的谱半径为 1 的特性，从而防止梯度消失或爆炸。
+
+##### 1.1 残差平衡损失 (Residual Balance Loss)
+
+该函数约束残差分支 $\mathbf{F}(\mathbf{x})$ 相对于主分支 $\mathbf{x}_{in}$ 的贡献比例。
+
+定义残差比率 $\rho$：
+
+$$\rho = \frac{\|\mathbf{F}(\mathbf{x})\|_M^2}{\|\mathbf{x}_{in}\|_M^2 + \|\mathbf{F}(\mathbf{x})\|_M^2 + \delta}$$
+
+损失函数为：
+
+$$\mathcal{L}_{balance} = (\rho - \gamma)^2$$
+
+其中 $\gamma$ 是目标比率 (target_ratio，通常为 0.5)，$\delta$ 是数值稳定项。
+
+##### 1.2 梯度范数保持损失 (Gradient Norm Preservation Loss)
+
+基于双随机矩阵谱半径为 1 的特性，层的输入输出范数应保持相对稳定。
+
+定义范数比率 $r$：
+
+$$r = \frac{\|\mathbf{x}_{out}\|_M}{\|\mathbf{x}_{in}\|_M + \delta}$$
+
+引入容差 $\tau$ (代码中为 0.2)，损失函数惩罚超出容差的偏差：
+
+$$\mathcal{L}_{norm} = \text{ReLU}(|r - 1| - \tau)^2$$
+
+##### 1.3 双随机惩罚 (Doubly Stochastic Penalty)
+
+如果存在显式的权重矩阵 $W$，该损失强制其经过指数变换后接近双随机矩阵（行和与列和均为 1）。
+
+令 $\tilde{W} = \exp(W)$：
+
+$$\mathcal{L}_{DS} = \frac{1}{N} \sum_i (\sum_j \tilde{W}_{ij} - 1)^2 + \frac{1}{N} \sum_j (\sum_i \tilde{W}_{ij} - 1)^2$$
+
+---
+
+#### 2. 空间与稳定性正则化 (Spatial & Stability Regularization)
+
+##### 2.1 梯度流平滑损失 (Gradient Flow Loss)
+
+约束预测的平移向量或噪声在空间上的平滑性。令残差 $R = \mathbf{T}_{pred} - \mathbf{T}_{target}$：
+
+$$\mathcal{L}_{flow} = \frac{\sum_{i=1}^{L-1} M_i M_{i+1} \|R_{i+1} - R_i\|_2^2}{\sum M_i M_{i+1}}$$
+
+这惩罚了相邻残基预测误差的剧烈波动。
+
+##### 2.2 特征稳定性损失 (Representation Stability Loss)
+
+简单的正则化项，防止激活值过大：
+
+$$\mathcal{L}_{stability} = \frac{1}{N_{mask}} \sum_{b, l, c} (s_{b,l,c} \cdot M_{b,l})^2$$
+
+---
+
+#### 3. 长序列自适应损失 (Long Sequence Adaptive Losses)
+
+针对长序列 ($L > 1024$) 累积误差大、易梯度爆炸的问题设计的特定约束。
+
+##### 3.1 序列长度自适应范数损失 (Sequence Length Adaptive Norm Loss)
+
+这与 1.2 类似，但容差 $\tau$ 和权重随序列长度动态调整。
+
+令长度因子 $\lambda = \sqrt{L / L_{base}}$：
+
+$$\tau_{long} = \max(0.1, \frac{0.2}{\lambda})$$
+
+$$\mathcal{L}_{adaptive} = \lambda \cdot \text{ReLU}\left( \left| \frac{\|\epsilon_{pred}\|}{\|\epsilon_{target}\|} - 1 \right| - \tau_{long} \right)^2$$
+
+##### 3.2 梯度幅度软裁剪损失 (Gradient Magnitude Clipping Loss)
+
+软约束预测噪声的幅度不超过阈值 $\tau_{max}$：
+
+$$\mathcal{L}_{clip} = \frac{1}{N_{mask}} \sum_{i} M_i \cdot \text{ReLU}(\|\epsilon_{pred, i}\|_2 - \tau_{max})^2$$
+
+##### 3.3 局部一致性损失 (Local Consistency Loss)
+
+在窗口 $k$ 内强制预测的局部一致性，距离越远权重越小：
+
+$$\mathcal{L}_{local} = \frac{1}{K} \sum_{k=1}^K \frac{1}{k} \sum_{i} \| \epsilon_{pred, i+k} - \epsilon_{pred, i} \|^2$$
+
+##### 3.4 谱范数正则化 (Spectral Norm Regularization)
+
+约束整个 Batch 或序列的能量比，是范数保持的另一种形式：
+
+$$r_{energy} = \frac{\sum \|\epsilon_{pred}\|^2}{\sum \|\epsilon_{target}\|^2}$$
+
+$$\mathcal{L}_{spectral} = (r_{energy} - 1)^2$$
+
+---
+
+#### 4. 高级 mHC 总损失 (Advanced mHC Loss)
+
+在 `compute_diffusion_loss` 中，总损失是上述各项的加权和。对于扩散模型训练，使用噪声预测 $\epsilon_{pred}$ 和目标 $\epsilon_{target}$ 作为网络输入输出的代理：
+
+$$\mathcal{L}_{total} = \lambda_1 \mathcal{L}_{base\_reg} + \lambda_2 \mathcal{L}_{balance} + \lambda_3 \mathcal{L}_{norm} + \lambda_4 \mathcal{L}_{flow} + \dots$$
+
+这种组合有效地在不引入显式 mHC 架构（如昂贵的 Sinkhorn 迭代层）的情况下，通过软约束模拟了 mHC 的数值稳定性优势。
+### 2.**流形约束超连接 (mHC)** **配对特征 (Pair Features)** 
+基于 `mhc_pair_transform_net.py`，该模块将 **流形约束超连接 (mHC)** 架构适配到了 **配对特征 (Pair Features)** 上。与标准的残差连接不同，mHC 在一个扩展的“超空间”中维护状态，通过动态投影与标准层交互。
+
+以下是核心数学公式说明。
+### 符号定义
+
+- $L$: 序列长度。
+    
+- $C$: 配对特征通道数。
+    
+- $n$: mHC 扩展率 (`expansion_rate`, 通常为 2 或 4)。
+    
+- $\mathbf{Z} \in \mathbb{R}^{L \times L \times C}$: 标准配对张量。
+    
+- $\mathcal{Z} \in \mathbb{R}^{L \times L \times n \times C}$: **超配对张量 (Hyper Pair Tensor)**。
+    
+    - 对于每对残基 $(i, j)$，我们不再只维护一个向量 $z_{ij}$，而是维护一个包含 $n$ 个向量的子空间 $\{z_{ij}^{(1)}, \dots, z_{ij}^{(n)}\}$。
+        
+---
+
+#### 1. 动态映射矩阵 (Dynamic Mapping Matrices)
+
+对于每对位置 $(i, j)$，网络根据当前状态 $\mathcal{Z}_{ij}$ 动态计算三个矩阵。
+
+首先将状态展平并归一化：
+$$x_{ij} = \text{Flatten}(\mathcal{Z}_{ij}) \in \mathbb{R}^{nC}$$
+$$\bar{x}_{ij} = \text{RMSNorm}(x_{ij})$$
+##### 1.1 预投影向量 (Pre-projection) $H_{pre}$
+
+将超空间 $\mathbb{R}^{n \times C}$ 压缩到标准空间 $\mathbb{R}^{C}$ 的权重。
+
+$$H_{pre, ij} = \sigma(\mathbf{W}_{pre} \bar{x}_{ij} + b_{pre}) \in \mathbb{R}^{1 \times n}$$
+
+其中 $\sigma$ 是 Sigmoid 函数。
+
+##### 1.2 后投影向量 (Post-projection) $H_{post}$
+
+将标准空间的更新量广播回超空间的权重。
+
+$$H_{post, ij} = 2 \cdot \sigma(\mathbf{W}_{post} \bar{x}_{ij} + b_{post}) \in \mathbb{R}^{n \times 1}$$
+
+系数 2 允许梯度的放大或缩小。
+
+##### 1.3 残差混合矩阵 (Residual Mixing) $H_{res}$
+
+在超空间内部混合信息的双随机矩阵 (Doubly Stochastic Matrix)。
+
+$$A_{ij} = \mathbf{W}_{res} \bar{x}_{ij} + b_{res} \in \mathbb{R}^{n \times n}$$
+$$H_{res, ij} = \text{SinkhornKnopp}(A_{ij})$$
+Sinkhorn 迭代确保 $\sum_k H_{res, ik} = 1$ 且 $\sum_k H_{res, kj} = 1$。这保证了深层网络中梯度的范数保持不变（谱半径为 1）。
+
+---
+
+#### 2. mHC 配对变换层 (mHC Pair Transform Layer)
+
+每一层的更新过程分为三个阶段：**收缩 (Contract)** -> **变换 (Transform)** -> **扩展与更新 (Expand & Update)**。
+
+##### 2.1 收缩 (Contraction)
+
+将高维的超配对特征投影到标准空间，以便输入到常规的 Evoformer 模块中。
+
+$$\tilde{Z}_{ij} = H_{pre, ij} \cdot \mathcal{Z}_{ij} = \sum_{k=1}^n H_{pre, ij}^{(k)} \cdot z_{ij}^{(k)}$$
+结果 $\tilde{Z}_{ij} \in \mathbb{R}^C$。
+##### 2.2 标准变换 (Standard Transform)
+
+在收缩后的特征上应用标准的三角更新、注意力机制和过渡层。令 $F$ 为包含以下组件的复合函数：
+
+1. Triangle Multiplicative Update
+    
+2. Triangle Attention (Start & End)
+    
+3. Pair Transition
+    
+
+$$\Delta Z_{ij} = F(\tilde{Z}_{ij})$$
+
+注意：这一步的计算复杂度仍为标准 Evoformer 的复杂度。
+##### 2.3 扩展 (Expansion)
+
+将计算出的更新量 $\Delta Z_{ij}$ 映射回 $n$ 维超空间：
+$$\Delta \mathcal{Z}_{ij} = H_{post, ij} \otimes \Delta Z_{ij}$$
+其中 $\otimes$ 表示外积 (Broadcasting)，结果维度为 $n \times C$。
+##### 2.4 超残差更新 (Hyper-Residual Update)
+最终的更新结合了内部混合 (Internal Mixing) 和新的更新量：
+
+$$\mathcal{Z}_{ij}^{(l+1)} = \underbrace{H_{res, ij} \cdot \mathcal{Z}_{ij}^{(l)}}_{\text{Stable Mixing}} + \underbrace{\Delta \mathcal{Z}_{ij}}_{\text{New Info}}$$
+
+---
+
+#### 3. 输入输出接口
+
+##### 3.1 输入扩展 (Input Expansion)
+
+如果是第一层，将标准输入复制 $n$ 次：
+$$\mathcal{Z}_{ij}^{(0, k)} = Z_{input, ij}, \quad \forall k \in [1, n]$$
+##### 3.2 输出收缩 (Output Contraction)
+
+如果是最后一层，对超维度取平均以恢复标准输出：
+$$Z_{output, ij} = \frac{1}{n} \sum_{k=1}^n z_{ij}^{(L, k)}$$
+---
+
+#### 4. 内存复杂度警告
+- **标准配对特征**: $O(L^2 \cdot C)$
+- **mHC 配对特征**: $O(L^2 \cdot n \cdot C)$
+
+由于 $L^2$ 项的存在，当 $L$ 很大（如 1024）且 $n=4$ 时，显存消耗会激增。
+例如，对于 $L=1024, C=128, n=4$ (FP32)：
+$$\text{Memory} \approx 1024^2 \times 4 \times 128 \times 4 \text{ bytes} \approx 2.1 \text{ GB}$$
+这仅是特征图的大小，不包括梯度和中间激活值。因此建议在配对特征上使用较小的 $n$ (如 $n=2$)。
+### 3.mHC Structure Net
+
+基于 `mhc_structure_net.py`，该模块将 **mHC (Manifold-Constrained Hyper-Connections)** 架构应用于 **单体特征 (Single Representation)** 及其核心组件 **IPA (Invariant Point Attention)**。
+
+以下是核心数学公式说明。
+#### 符号定义
+
+- $L$: 序列长度。
+    
+- $C_s$: 单体特征维度。
+    
+- $n$: mHC 扩展率 (通常为 4)。
+    
+- $\mathcal{S} \in \mathbb{R}^{L \times n \times C_s}$: **超单体特征 (Hyper Single Features)**。
+    
+- $T$: 刚体变换 (Rigid Transform)。
+    
+
+---
+
+#### 1. 动态映射 (Dynamic Mappings)
+
+对于每个残基 $i$，网络动态计算投影矩阵和混合矩阵。
+展平并归一化：
+$$x_i = \text{Flatten}(\mathcal{S}_i) \in \mathbb{R}^{nC_s}$$
+$$\bar{x}_i = \text{RMSNorm}(x_i)$$
+
+##### 1.1 预投影 (Pre-projection) $H_{pre}$
+$$\mathbf{H}_{pre, i} = \sigma(\mathbf{W}_{pre} \bar{x}_i + b_{pre}) \in \mathbb{R}^{1 \times n}$$
+##### 1.2 后投影 (Post-projection) $H_{post}$
+$$\mathbf{H}_{post, i} = 2 \cdot \sigma(\mathbf{W}_{post} \bar{x}_i + b_{post}) \in \mathbb{R}^{n \times 1}$$
+##### 1.3 残差混合 (Residual Mixing) $H_{res}$
+这是一个通过 Sinkhorn-Knopp 算法生成的双随机矩阵。
+$$\mathbf{A}_{i} = \mathbf{W}_{res} \bar{x}_i + b_{res} \in \mathbb{R}^{n \times n}$$
+$$\mathbf{H}_{res, i} = \text{SinkhornKnopp}(\mathbf{A}_{i})$$
+---
+
+#### 2. mHC 结构层 (mHC Structure Layer)
+
+数据流遵循**收缩-处理-扩展**的模式。
+
+##### 2.1 收缩与 IPA (Contraction & IPA)
+
+首先将超特征收缩回标准维度，以便输入到标准的 IPA 模块中。
+$$s_{contracted, i} = \mathbf{H}_{pre, i} \cdot \mathcal{S}_i = \sum_{k=1}^n H_{pre, i}^{(k)} \cdot s_i^{(k)}$$
+然后执行标准的结构更新操作（IPA + Transition）：
+$$\Delta s_{ipa} = \text{LayerNorm}(\text{Dropout}(\text{IPA}(s_{contracted}, p, T, \text{mask})))$$
+$$\Delta s_{total} = \text{Transition}(\Delta s_{ipa})$$
+##### 2.2 扩展与更新 (Expansion & Update)
+
+将标准维度的更新量 $\Delta s_{total}$ 广播回 $n$ 维超空间：
+$$\Delta \mathcal{S}_i = \mathbf{H}_{post, i} \otimes \Delta s_{total}$$
+结合内部混合和新信息进行最终更新：
+$$\mathcal{S}_i^{(l+1)} = \mathbf{H}_{res, i} \cdot \mathcal{S}_i^{(l)} + \Delta \mathcal{S}_i$$
+##### 2.3 骨架更新 (Backbone Update)
+
+每一层的最后，利用收缩后的特征更新刚体变换 $T$：
+
+$$s_{for\_bb} = \text{Contract}(\mathcal{S}^{(l+1)})$$
+$$T^{(l+1)} = T^{(l)} \circ \text{BackboneUpdate}(s_{for\_bb})$$
+---
+
+#### 3. 数值稳定性与梯度流
+
+mHC 的核心价值在于 $\mathbf{H}_{res}$ 的双随机性质。根据 Perron-Frobenius 定理，双随机矩阵的最大特征值（谱半径）为 1。
+$$\|\mathbf{H}_{res, i} \cdot \mathcal{S}_i\| \approx \|\mathcal{S}_i\|$$
+这意味着在深层网络（如 AlphaFold2 的 48 层 Evoformer 或 8 层 Structure Module）中，残差流既不会发生梯度爆炸（Explosion），也不会发生梯度消失（Vanishing）。这对于长序列训练至关重要，因为标准残差连接通常依赖 LayerNorm 来控制尺度，而 LayerNorm 在极深网络中可能失效。
+#### 4. 内存分析
+
+相比 `mHCPairTransformNet`，`mHCStructureNet` 的内存开销要小得多，因为它是作用在单体特征 ($L \times C$) 上，而不是配对特征 ($L^2 \times C$) 上。
+- **单体特征**: $O(L \cdot n \cdot C)$
+- **配对特征**: $O(L^2 \cdot n \cdot C)$
+
+因此，通常可以安全地在 Structure Module 中使用较大的扩展率 (如 $n=4$)，而不会导致显存溢出。
+### 4.mHC Slash Structure Net
+基于 `mhc_flash_structure_net.py`，该模块是 **mHC (Manifold-Constrained Hyper-Connections)** 与 **Flash-IPA (Flash Invariant Point Attention)** 的结合体。
+这种设计旨在同时解决长序列蛋白质生成中的两个核心瓶颈：
+1. **训练稳定性**：通过 mHC 的双随机残差流解决深层网络和长序列的梯度爆炸/消失问题。
+2. **显存效率**：通过 Flash-IPA 避免显式构建 $L \times L$ 的配对注意力偏置矩阵。
+
+以下是核心数学公式说明。
+#### 符号定义
+
+- $\mathcal{S} \in \mathbb{R}^{L \times n \times C_s}$: mHC 扩展后的超单体特征 (Hyper Single Representation)。
+    
+- $s \in \mathbb{R}^{L \times C_s}$: 收缩后的标准单体特征。
+    
+- $Z_{fac1} \in \mathbb{R}^{L \times R \times C_z}$: 因子化的配对特征（左因子）。
+    
+- $Z_{fac2} \in \mathbb{R}^{L \times H \times R \times \frac{C_z}{4}}$: 因子化的配对特征（右因子，针对多头优化）。
+    
+- $T$: 刚体变换 (包含旋转 $R$ 和平移 $\vec{t}$)。
+    
+
+---
+
+#### 1. mHC 动态投影与混合 (mHC Dynamic Projection & Mixing)
+
+与之前的 mHC 模块相同，首先计算动态映射矩阵，用于在超空间和标准空间之间转换。
+$$x_i = \text{Flatten}(\mathcal{S}_i), \quad \bar{x}_i = \text{RMSNorm}(x_i)$$
+- **收缩矩阵**: $\mathbf{H}_{pre, i} = \sigma(\mathbf{W}_{pre} \bar{x}_i + b_{pre}) \in \mathbb{R}^{1 \times n}$
+- **扩展矩阵**: $\mathbf{H}_{post, i} = 2\sigma(\mathbf{W}_{post} \bar{x}_i + b_{post}) \in \mathbb{R}^{n \times 1}$
+- **残差矩阵**: $\mathbf{H}_{res, i} = \text{Sinkhorn}(\mathbf{W}_{res} \bar{x}_i + b_{res}) \in \mathbb{R}^{n \times n}$
+
+---
+
+#### 2. Flash-IPA 核心计算
+
+Flash-IPA 的核心在于**不显式构建 $L \times L$ 的 Pair Bias 矩阵**。
+##### 2.1 收缩 (Contraction)
+将超特征投影到标准维度，作为 Flash-IPA 的 Query/Key/Value 输入源：
+$$s_{in, i} = \mathbf{H}_{pre, i} \cdot \mathcal{S}_i$$
+##### 2.2 因子化偏置注意力 (Factorized Bias Attention)
+
+标准 IPA 的注意力分数计算包含一个配对偏置项 $b_{ij} = w^T z_{ij}$。
+
+在 Flash-IPA 中，这个偏置项通过低秩因子重建：
+$$b_{ij} \approx \text{Linear}(Z_{fac1, i} \odot Z_{fac2, j})$$
+完整的注意力分数计算为：
+$$A_{ij} = \frac{q_i k_j^T}{\sqrt{d}} + b_{ij} + \text{GeometryTerm}(T_i, T_j)$$
+Flash-IPA 利用 Flash Attention 算子（如 FlashAttention-2 或 3）在计算 $A_{ij}$ 后立即计算 Softmax 和 Value 聚合，而不将完整的 $A_{ij}$ 写入显存。
+$$s_{ipa} = \text{FlashAttention}(Q, K, V, \text{BiasFactors})$$
+---
+
+#### 3. 结构层更新流 (Structure Layer Update Flow)
+
+##### 3.1 IPA 与过渡 (IPA & Transition)
+$$\Delta s = \text{Transition}(\text{LayerNorm}(\text{Dropout}(s_{ipa})))$$
+注意：这里的 $\Delta s \in \mathbb{R}^{L \times C_s}$ 是在标准维度上计算的。
+##### 3.2 扩展与超残差 (Expansion & Hyper-Residual)
+
+将更新量广播回超空间，并与历史状态混合：
+$$\mathcal{S}_i^{(l+1)} = \underbrace{\mathbf{H}_{res, i} \cdot \mathcal{S}_i^{(l)}}_{\text{Stable History}} + \underbrace{\mathbf{H}_{post, i} \otimes \Delta s_i}_{\text{New Info}}$$
+这种机制确保了即使在 1000+ 层的深度或 2048+ 的序列长度下，梯度的传播依然由谱半径为 1 的 $\mathbf{H}_{res}$ 主导，极其稳定。
+##### 3.3 骨架更新 (Backbone Update)
+刚体变换的更新依赖于 IPA 的输出（未经 mHC 扩展）：
+$$T^{(l+1)} = T^{(l)} \circ \text{BackboneUpdate}(s_{ipa})$$
+---
+
+#### 4. 显存与复杂度优势
+
+该模块实现了双重优化：
+
+1. **参数与状态效率 (mHC)**:
+    - 通过 $n$ 倍扩展残差流，但仅使用 $O(n)$ 的参数生成投影矩阵，避免了直接增加网络宽度带来的 $O(C^2)$ 参数增长。
+2. **注意力显存效率 (Flash-IPA)**:
+    - **标准 IPA**: 显存 $O(L^2 \cdot H)$ (用于存储 logits 和配对偏置)。
+    - **Flash-IPA**: 显存 $O(L \cdot H)$ (线性复杂度，利用分块计算)。
+
+结合后，该网络能够以线性显存复杂度训练超长序列，同时保持极深的残差网络收敛性。
+## 📦 文件清单
 ### Stage 4-5 新增文件 (4 个核心模块) ** Stage 4-5**
 
-18. **`genie/model/axial_attention.py`** (600+ 行) ** Stage 4**
+1. **`genie/model/axial_attention.py`** (600+ 行) ** Stage 4**
     - `AxialAttention`: 轴向注意力 (行+列分解)
     - `FactorizedAxialAttention`: 因子化轴向注意力
-19. **`genie/training/gradient_checkpointing.py`** (400+ 行) **Stage 4**
+2. **`genie/training/gradient_checkpointing.py`** (400+ 行) **Stage 4**
     - `CheckpointConfig`: 检查点配置
     - `AdaptiveCheckpointManager`: 自适应检查点管理
     - `CheckpointedSequential`: 检查点序列模块
-20. **`genie/model/model_compression.py`** (500+ 行) **Stage 4**
+3. **`genie/model/model_compression.py`** (500+ 行) **Stage 4**
     - `CompressedStructureNet`: 压缩结构网络
     - `SharedLayerModule`: 共享层模块
     - `AlternatingSharedLayers`: 交替共享层
-21. **`genie/training/distributed_training.py`** (500+ 行) **Stage 5**
+4. **`genie/training/distributed_training.py`** (500+ 行) **Stage 5**
     - `DistributedModelWrapper`: DDP封装
     - `SequenceTensorParallel`: 序列张量并行
     - `GradientAccumulator`: 梯度累积
-22. **`test_stage4_5.py`** (500+ 行) **Stage 4-5**
+5. **`test_stage4_5.py`** (500+ 行) **Stage 4-5**
     - 6 个综合测试
     - Stage 4-5 集成测试
 
 ### Stage 3 V2 新增文件 (2 个核心模块) **Stage 3 V2**
 
-16. **`genie/model/sparse_pairs.py`** (500+ 行) **Stage 3 V2**
+1. **`genie/model/sparse_pairs.py`** (500+ 行) **Stage 3 V2**
     - `SparseKNNPairSelector`: 稀疏 k-NN 对选择器
     - 三种选择策略: coordinate / sequence / hybrid
     - 支持超长序列 
-17. **`test_stage3_v2.py`** (400+ 行) **Stage 3 V2**
+2. **`test_stage3_v2.py`** (400+ 行) **Stage 3 V2**
     - 4 个综合测试
     - Ultra-long memory scaling
 
 ### Stage 3 新增文件 (4 个核心模块) **Stage 3**
 
-12. **`genie/training/progressive_training.py`** (400+ 行) **Stage 3**
+1. **`genie/training/progressive_training.py`** (400+ 行) **Stage 3**
     - `ProgressiveTrainingScheduler`: 渐进式训练调度器
     - `ChunkedLossComputation`: 分块损失计算
     - 支持 linear/cosine/exponential 增长曲线
     - FAPE 和 dRMSD 损失支持
-13. **`genie/training/mixed_precision.py`** (300+ 行) **Stage 3**
+2. **`genie/training/mixed_precision.py`** (300+ 行) **Stage 3**
     - `MixedPrecisionTrainer`: 混合精度训练管理器
     - `SelectiveMixedPrecision`: 选择性精度控制
     - FP16/BF16 支持 + 动态损失缩放
     - **收益**: 50% 内存节省 + 2-3x 训练加速
-14. **`genie/training/stage3_trainer.py`** (400+ 行) **Stage 3**
+3. **`genie/training/stage3_trainer.py`** (400+ 行) **Stage 3**
     - `Stage3TrainingManager`: 综合训练管理器
     - 集成所有 Stage 3 优化
     - 统一训练接口
     - Checkpoint 支持
-15. **`test_stage3_optimizations.py`** (400+ 行) **Stage 3**
+4. **`test_stage3_optimizations.py`** (400+ 行) **Stage 3**
     - 5 个综合测试
     - Performance comparison
 
 ### Stage 2 新增文件 (3 个核心模块)
 
-9. **`genie/model/factorized_triangle_ops.py`** (500+ 行) **Stage 2**
+1. **`genie/model/factorized_triangle_ops.py`** (500+ 行) **Stage 2**
    - `FactorizedTriangleMultiplicativeUpdate`: 因子化三角乘法更新
    - `FactorizedTriangleMultiplicationOutgoing`: Outgoing 变体
    - `FactorizedTriangleMultiplicationIncoming`: Incoming 变体
    - `ChunkedTriangleAttention`: 分块三角注意力
    - `ChunkedTriangleAttentionStartingNode`: 行方向注意力
    - `ChunkedTriangleAttentionEndingNode`: 列方向注意力
-10. **`genie/model/factorized_pair_transform.py`** (300+ 行) **Stage 2**
+2. **`genie/model/factorized_pair_transform.py`** (300+ 行) **Stage 2**
     - `FactorizedPairTransformLayer`: 单层 pair 转换
     - `FactorizedPairTransformNet`: 多层 pair 转换网络
     - 完整的 Evoformer-style processing
     - 所有操作都在因子化表示上进行
-11. **`test_stage2_optimizations.py`** (400+ 行) **Stage 2**
+3. **`test_stage2_optimizations.py`** (400+ 行) **Stage 2**
     - 5 个综合测试
     - 内存缩放分析
     - Stage 1 vs Stage 2 对比
@@ -994,12 +1373,12 @@ class GradientAccumulator:
 
 ### 文档 (4 个文件)
 
-4. **`EVALUATION_AND_IMPROVEMENTS.md`** (2000+ 行)
+1. **`EVALUATION_AND_IMPROVEMENTS.md`** (2000+ 行)
    - 完整的评估报告
    - 5 阶段优化路线图
    - 详细的技术分析
    - 代码示例和基准测试
-6. **`mhc_code_review_fixes.md`** (之前创建)
+2. **`mhc_code_review_fixes.md`** (之前创建)
    - Bug 修复总结
    - Skip Connection 详细分析
    - Sinkhorn 优化说明
