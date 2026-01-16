@@ -27,7 +27,7 @@
 
 Flash-Genie通过系统的优化方法应对这些挑战。我们将Flash Attention \citep{dao2022flashattentionfastmemoryefficientexact}、Flash-IPA \citep{liu2025flashinvariantpointattention}和mHC架构 \citep{xie2026mhcmanifoldconstrainedhyperconnections}与分解成对特征 \citep{ho2019axialattentionmultidimensionaltransformers}集成，以直接生成分解表示而不产生中间$L^2$张量。实现了三角运算分解，在保持类Evoformer处理表达能力的同时避免了$O(L^3)$的内存复杂度。随后引入了渐进式训练调度器和分块损失计算，允许课程学习策略以实现长序列的稳定收敛。当序列长度超过实际限制时，采用稀疏$k$NN成对选择将内存从$O(L^2)$减少到$O(L \cdot k)$。在此之后，通过轴向注意力和模型压缩技术（包括层共享和瓶颈架构）进一步优化计算效率。最后，通过分布式数据并行、序列张量并行和梯度累积机制实现大规模训练。
 
-\section{预备知识}
+\section{方法论(Methodology)}
 
 \subsection{问题形式化}
 
